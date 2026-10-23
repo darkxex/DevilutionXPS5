@@ -141,6 +141,14 @@ static struct
 static int want_width, want_height;
 static char error_text[256];
 
+/* Informational lines (the TV's modes, the swapchain, the first frames) only when built with -DPS5VK_DEBUG;
+ * what a failure says is always sent. */
+#ifdef PS5VK_DEBUG
+#define VKLOG(...) ps5vk_log(__VA_ARGS__)
+#else
+#define VKLOG(...) ((void)0)
+#endif
+
 void ps5vk_log(const char *format, ...)
 {
     char line[320];
@@ -275,7 +283,7 @@ static int create_surface(void)
     for (uint32_t i = 0; i < mode_count; ++i)
     {
         const VkDisplayModeParametersKHR *p = &modes[i].parameters;
-        ps5vk_log("display mode %ux%u @ %.2f Hz", p->visibleRegion.width, p->visibleRegion.height,
+        VKLOG("display mode %ux%u @ %.2f Hz", p->visibleRegion.width, p->visibleRegion.height,
                   p->refreshRate / 1000.0);
         int hz_ok = p->refreshRate >= 59000 && p->refreshRate <= 61000;
         if (!hz_ok)
@@ -331,7 +339,7 @@ static int create_surface(void)
     info.imageExtent = mode->parameters.visibleRegion;
     CHECK(vkCreateDisplayPlaneSurfaceKHR(V.instance, &info, NULL, &V.surface), "vkCreateDisplayPlaneSurfaceKHR");
     V.hz = mode->parameters.refreshRate / 1000.0;
-    ps5vk_log("using %ux%u @ %.2f Hz", mode->parameters.visibleRegion.width, mode->parameters.visibleRegion.height,
+    VKLOG("using %ux%u @ %.2f Hz", mode->parameters.visibleRegion.width, mode->parameters.visibleRegion.height,
               V.hz);
     return 1;
 }
@@ -417,7 +425,7 @@ static int create_swapchain(void)
     CHECK(vkCreateSwapchainKHR(V.device, &info, NULL, &V.swapchain), "vkCreateSwapchainKHR");
     V.image_count = MAX_IMAGES;
     CHECK(vkGetSwapchainImagesKHR(V.device, V.swapchain, &V.image_count, V.images), "swapchain images");
-    ps5vk_log("swapchain %ux%u, %u images, format %d", V.extent.width, V.extent.height, V.image_count, (int)V.format);
+    VKLOG("swapchain %ux%u, %u images, format %d", V.extent.width, V.extent.height, V.image_count, (int)V.format);
     return 1;
 }
 
@@ -597,7 +605,7 @@ int ps5vk_open(void)
           create_frames()))
         return -1;
     V.open = 1;
-    ps5vk_log("open");
+    VKLOG("open");
     return 0;
 }
 
@@ -711,7 +719,7 @@ PS5VKTexture *ps5vk_texture_create(int width, int height, int bgra)
         t->staging_map[f] = map;
         memset(map, 0, (size_t)width * height * 4);
     }
-    ps5vk_log("texture %dx%d %s", width, height, bgra ? "bgra" : "rgba");
+    VKLOG("texture %dx%d %s", width, height, bgra ? "bgra" : "rgba");
     return t;
 fail:
     snprintf(error_text, sizeof(error_text), "texture %dx%d could not be made", width, height);
@@ -919,7 +927,7 @@ void ps5vk_frame_present(void)
     VkResult presented = vkQueuePresentKHR(V.queue, &present);
     static unsigned frames;
     if (frames < 5 || frames % 600 == 0)
-        ps5vk_log("frame %u: acquire %d, submit %d, present %d; uploads %d, draws %d, clear %.2f %.2f %.2f", frames,
+        VKLOG("frame %u: acquire %d, submit %d, present %d; uploads %d, draws %d, clear %.2f %.2f %.2f", frames,
                   (int)r, (int)submitted, (int)presented, V.upload_count, V.draw_count, V.clear[0], V.clear[1],
                   V.clear[2]);
     ++frames;

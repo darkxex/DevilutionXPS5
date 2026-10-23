@@ -14,6 +14,8 @@
 
 extern int __real_main(int argc, char** argv, char** envp);
 extern void SDL_SetMainReady(void) __attribute__((weak));
+// The system settings' values (libSceSystemService); id 1 is the language.
+extern int sceSystemServiceParamGetInt(int id, int* value);
 // What the game and the Vulkan driver write to stderr goes to the console's klog (nc <PS5 IP> 3232).
 extern int ps5_klog_capture_stderr(const char* prefix) __attribute__((weak));
 
@@ -191,6 +193,35 @@ __attribute__((constructor(101))) static void early_init(void) {
     prepare_storage();
 }
 
+// The console's language as the locales DevilutionX tries, best first. It reads them from $LANGUAGE when the
+// game's language is not in diablo.ini yet (Source/platform/locale.cpp), so the first start follows the console and
+// a language chosen in the game's settings wins afterwards. Spanish from Spain and from Latin America are both "es".
+static const char* console_locales(int lang) {
+    switch (lang) {
+    case 0: return "ja";
+    case 2: case 22: return "fr";          // French, Canadian French
+    case 3: case 20: return "es";          // Spanish, Latin American Spanish
+    case 4: return "de";
+    case 5: return "it";
+    case 7: return "pt_PT:pt_BR";          // Portuguese: the one Portuguese translation is Brazilian
+    case 8: return "ru";
+    case 9: return "ko";
+    case 10: return "zh_TW";
+    case 11: return "zh_CN";
+    case 12: return "fi";
+    case 13: return "sv";
+    case 14: return "da";
+    case 16: return "pl";
+    case 17: return "pt_BR";
+    case 19: return "tr";
+    case 23: return "cs";
+    case 24: return "hu";
+    case 25: return "el";
+    case 26: return "ro";
+    default: return "en";                  // English, and the languages the game has no translation for
+    }
+}
+
 int __wrap_main(int argc, char** argv, char** envp) {
     if (ps5_klog_capture_stderr)
         ps5_klog_capture_stderr("[DevilutionX] ");
@@ -210,6 +241,15 @@ int __wrap_main(int argc, char** argv, char** envp) {
     mkdir(DATA_ROOT "/mods", 0777);
     setenv("XDG_DATA_HOME", DATA_ROOT, 1);
     setenv("HOME", DATA_ROOT, 1);
+
+    int console_language = 1;
+    if (sceSystemServiceParamGetInt(1, &console_language) == 0) {
+        const char* locales = console_locales(console_language);
+        setenv("LANGUAGE", locales, 0); // unless the caller already set one
+#ifdef PS5_DEBUG_LOG
+        fprintf(stderr, "console language %d -> %s\n", console_language, locales);
+#endif
+    }
 
     // The console only has a full-screen output: render at 4K; the console scales it to the TV.
     if (ps5vk_prefer_mode)
