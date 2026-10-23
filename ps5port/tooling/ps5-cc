@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Compiler and linker driver for meson: compiles with the PS5 Clang wrapper and
+# turns link steps into a prospero-lld call with the native app layout (startup
+# objects, linker script, SDK imports), so meson can build the game as an
+# ordinary cross target. The result is the intermediate PIE; build_ps5.py
+# converts it to eboot.bin.
+#
+# Needs PS5_PAYLOAD_SDK and PS5_RT_OBJECTS (startup, heap, entry objects).
+set -euo pipefail
+
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+sdk=${PS5_PAYLOAD_SDK:?PS5_PAYLOAD_SDK is not set}
+
+link=1
+for arg in "$@"; do
+    case $arg in
+        -c|-E|-S|-M|-MM|-MD|--version|-v|-dumpmachine|-dumpversion|--help|-###|-print-*|-x|-shared)
+            link=0 ;;
+    esac
+done
+if (( link == 0 )); then
+    exec sh "$here/prospero-clang18" "$@"
+fi
+
+out=a.out
+cflags=()
+inputs=()
+libdirs=()
+libs=()
+extra=()
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    arg=${args[i]}
+    case $arg in
+        -o) out=${args[++i]} ;;
+        -o*) out=${arg#-o} ;;
+        -L) libdirs+=("${args[++i]}") ;;
+        -L*) libdirs+=("${arg#-L}") ;;
+        -l) libs+=("${args[++i]}") ;;
+        # libkernel_web belongs to the browser; a title gets libkernel (and libkernel_sys)
+        -lkernel_web|*/libkernel_web.so) ;;
+        -l*) libs+=("${arg#-l}") ;;
+        -Wl,*)
+            IFS=, read -r -a parts <<< "${arg#-Wl,}"
+            for ((j = 0; j < ${#parts[@]}; j++)); do
+                part=${parts[j]}
+                case $part in
+                    -rpath|-soname|-z|--version-script|-h|-m) ((j += 1)) ;;
+                    --start-group|--end-group|-Bstatic|-Bdynamic|--as-needed|--no-as-needed|--allow-shlib-undefined|\
+                    --no-undefined|-rpath=*|--gc-sections|--no-gc-sections|-O*|--sort-common*|--enable-new-dtags|\
+                    --version-script=*|-soname=*|-s|--strip-all) ;;
+                    *) extra+=("$part") ;;
+                esac
+            done ;;
+        -include|-isystem|-iquote|-idirafter|-imacros|-MF|-MT|-MQ|-Xclang|-Xlinker|-target|--target)
+            cflags+=("$arg" "${args[++i]}") ;;
+        -*) cflags+=("$arg") ;;
+        *) inputs+=("$arg") ;;
+    esac
+done
+
+# meson's configure checks compile and link a source file in one command.
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+for i in "${!inputs[@]}"; do
+    case ${inputs[i]} in
+        *.c|*.cc|*.cpp|*.cxx|*.S)
+            sh "$here/prospero-clang18" "${cflags[@]}" -c "${inputs[i]}" -o "$scratch/$i.o"
+            inputs[i]=$scratch/$i.o ;;
+    esac
+done
+
+found=()
+for lib in "${libs[@]}"; do
+    for dir in "${libdirs[@]}" "$sdk/target/lib"; do
+        if [[ -f $dir/lib$lib.a || -f $dir/lib$lib.so ]]; then
+            found+=("-l$lib")
+            break
+        fi
+    done
+done
+
+resource=$("${PS5_CLANG:-clang-18}" --print-resource-dir)
+builtins=$resource/lib/linux/libclang_rt.builtins-x86_64.a
+read -r -a runtime <<< "${PS5_RT_OBJECTS:?PS5_RT_OBJECTS is not set}"
+dirs=()
+for dir in "${libdirs[@]}"; do dirs+=("-L$dir"); done
+
+# PS5_RADV_ARCHIVE: the title shows its picture through Vulkan, so RADV (Mesa's AMD driver, ported to the console)
+# is linked into it, whole, with the SDK's platform layer, C++ runtime and the platform's libc bindings:
+# radv/radv-link.sh is the recipe, and this applies it. The title keeps its own heap, so the recipe's
+# allocator wraps (and the directory and network names it binds) are left out.
+if [[ -n ${PS5_RADV_ARCHIVE:-} ]]; then
+    root=$(dirname "$here")
+    # shellcheck source=/dev/null
+    source "$here/radv/radv-link.sh"
+    PS5_CLANG="${PS5_CLANG:-clang-18}" LLVM_NM="$sdk/bin/llvm-nm" \
+        radv_link_recipe "$root" "$sdk" "$PS5_RADV_ARCHIVE" || exit 2
+    linker=("${radv_linker_script[@]}" --no-dynamic-linker -z nodynamic-undefined-weak)
+    skip_next=0
+    for flag in "${radv_link_flags[@]}"; do
+        if (( skip_next )); then skip_next=0; continue; fi
+        case $flag in
+            --wrap=malloc|--wrap=calloc|--wrap=realloc|--wrap=free|--wrap=posix_memalign|\
+            --wrap=aligned_alloc|--wrap=memalign|--wrap=malloc_usable_size|--wrap=reallocf|\
+            --wrap=reallocarray|--wrap=getline|--wrap=getdelim) ;;
+            --defsym=opendir=*|--defsym=fdopendir=*|--defsym=readdir=*|--defsym=rewinddir=*|\
+            --defsym=dirfd=*|--defsym=closedir=*|--defsym=access=*|--defsym=getaddrinfo=*|\
+            --defsym=freeaddrinfo=*|--defsym=nl_langinfo=*|--defsym=nl_langinfo_l=*|--defsym=strcasestr=*) ;;
+            --version-script) skip_next=1 ;; # rebuilt below for the names kept
+            *) linker+=("$flag") ;;
+        esac
+    done
+    map="$root/build/radv-platform-local.map"
+    {
+        printf '{\n    local:\n'
+        for flag in "${linker[@]}"; do
+            [[ $flag == --defsym=* ]] || continue
+            flag=${flag#--defsym=}
+            printf '        %s;\n' "${flag%%=*}"
+        done
+        printf '};\n'
+    } > "$map"
+    stubs=()
+    for stub in "${PS5_AGC_STUBS:?PS5_AGC_STUBS is not set}"/*.so; do stubs+=("$stub"); done
+    # RADV's archive carries zlib (Mesa's), linked whole: the game's own copy would define every name twice
+    kept=()
+    for input in "${inputs[@]}"; do
+        [[ $input == */libz.a ]] || kept+=("$input")
+    done
+    inputs=("${kept[@]}")
+    "$sdk/bin/prospero-lld" "${linker[@]}" --version-script "$map" --gc-sections --eh-frame-hdr \
+        --wrap=malloc --wrap=calloc --wrap=realloc --wrap=free --wrap=posix_memalign \
+        --wrap=malloc_usable_size --wrap=main --wrap=getcwd --wrap=exit \
+        --version-script "$here/native/app-symbols.map" -e _start -o "$out" --error-limit=0 \
+        -L "$here/native" -L "$sdk/target/lib" "${dirs[@]}" --as-needed \
+        "${runtime[@]}" --start-group "${inputs[@]}" "${found[@]}" "${extra[@]}" --end-group \
+        "${radv_link_inputs[@]}" "${stubs[@]}" "$sdk"/target/lib/*.so \
+        --start-group "$sdk/target/lib/libc.a" --end-group
+    exit
+fi
+
+"$sdk/bin/prospero-lld" -T "$here/native/ps5-pie.ld" --gc-sections --eh-frame-hdr \
+    --wrap=malloc --wrap=calloc --wrap=realloc --wrap=free --wrap=posix_memalign \
+    --wrap=malloc_usable_size --wrap=main --wrap=getcwd --wrap=exit \
+    --version-script "$here/native/app-symbols.map" -e _start -o "$out" --error-limit=0 \
+    -L "$here/native" -L "$sdk/target/lib" "${dirs[@]}" --as-needed \
+    "${runtime[@]}" --start-group "${inputs[@]}" "${found[@]}" "${extra[@]}" \
+    "$sdk/target/lib/libc++.a" "$sdk/target/lib/libc++abi.a" "$sdk/target/lib/libunwind.a" \
+    "$builtins" --end-group "$sdk"/target/lib/*.so \
+    --start-group "$sdk/target/lib/libc.a" --end-group

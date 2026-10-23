@@ -1,0 +1,6 @@
+# build output, downloaded SDKs and sources
+build/
+dist/
+.deps/
+__pycache__/
+CLAUDE.md

@@ -118,7 +118,7 @@ void DiscoverMods()
 
 std::optional<Ini> ini;
 
-#if (defined(__ANDROID__) && !defined(TERMUX)) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE == 1)
+#if (defined(__ANDROID__) && !defined(TERMUX)) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE == 1) || defined(DEVILUTIONX_FIXED_DISPLAY)
 constexpr OptionEntryFlags OnlyIfSupportsWindowed = OptionEntryFlags::Invisible;
 #else
 constexpr OptionEntryFlags OnlyIfSupportsWindowed = OptionEntryFlags::None;
@@ -748,7 +748,12 @@ GraphicsOptions::GraphicsOptions()
 #endif
           )
 #if !defined(USE_SDL1) || defined(__3DS__)
-    , fitToScreen("Fit to Screen", OptionEntryFlags::CantChangeInGame | OptionEntryFlags::RecreateUI, N_("Fit to Screen"), N_("Automatically adjust the game window to your current desktop screen aspect ratio and resolution."),
+    , fitToScreen("Fit to Screen", OptionEntryFlags::CantChangeInGame | OptionEntryFlags::RecreateUI
+#ifdef DEVILUTIONX_FIXED_DISPLAY
+              | OptionEntryFlags::Invisible
+#endif
+          ,
+          N_("Fit to Screen"), N_("Automatically adjust the game window to your current desktop screen aspect ratio and resolution."),
 #if defined(__DJGPP__) || defined(__EMSCRIPTEN__)
           false
 #else
@@ -774,7 +779,7 @@ GraphicsOptions::GraphicsOptions()
 #endif
     , frameRateControl("Frame Rate Control",
           OptionEntryFlags::RecreateUI
-#if defined(NXDK) || defined(__ANDROID__)
+#if defined(NXDK) || defined(__ANDROID__) || defined(DEVILUTIONX_FIXED_DISPLAY)
               | OptionEntryFlags::Invisible
 #endif
           ,
